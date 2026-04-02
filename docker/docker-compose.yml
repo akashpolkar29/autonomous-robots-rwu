@@ -1,0 +1,19 @@
+services:
+  test-service:
+    container_name: ros-container
+    hostname: akash-polkar  # 👈 ADD THIS LINE
+    image: basicdockerimage
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile
+    volumes:
+      - $IKI_WORKSPACE/26ss_ap-246880/src:/root/iki_ws/src
+      - $IKI_WORKSPACE/my_bash_history:/root/.bash_history
+      - $IKI_WORKSPACE/26ss_ap-246880/my_bashrc:/root/.bashrc
+    working_dir: /root/iki_ws
+    command:
+      - bash
+      - -c
+      - |
+        tail -f /dev/null
+
