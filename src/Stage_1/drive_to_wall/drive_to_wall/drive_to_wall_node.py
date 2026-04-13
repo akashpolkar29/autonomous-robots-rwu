@@ -1,33 +1,44 @@
+#!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
+from sensor_msgs.msg import LaserScan
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 
-class DriveToWall(Node):
-
+class DriveToWall(Node): 
     def __init__(self):
-        super().__init__('drive_to_wall_node')
+        super().__init__("drive_to_wall")
 
-        self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Publisher
+        self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
+
+        # Subscriber
+        qos_profile = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
         self.subscription = self.create_subscription(
             LaserScan,
             '/scan',
             self.scan_callback,
-            10
+            qos_profile
         )
 
-    def scan_callback(self, msg):
-        distance = msg.ranges[0]
+        self.get_logger().info("✅ drive_to_wall node started")
 
+    def scan_callback(self, msg):
         twist = Twist()
 
-        if distance > 1.0:
+        # Read front distance
+        front_distance = msg.ranges[0]
+
+        # Move or stop
+        if front_distance > 1.0:
             twist.linear.x = 0.5
         else:
             twist.linear.x = 0.0
 
-        self.publisher.publish(twist)
+        # Publish command
+        self.publisher_.publish(twist)
 
 
 def main(args=None):
@@ -38,5 +49,5 @@ def main(args=None):
     rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
