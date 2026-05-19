@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'autorace_real'
+package_name = 'rainbow_circle'
 
 setup(
     name=package_name,
@@ -20,8 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'start_signal_real = autorace_real.start_signal_real:main',
-            'follow_wall_real = autorace_real.follow_wall_real:main', 
+            'single_threading_node = rainbow_circle.single_threading_node:main',
+            'multithreading_node = rainbow_circle.multithreading_node:main',
         ],
     },
 )
