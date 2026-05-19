@@ -1,0 +1,6 @@
+float32 critical
+float32 warn
+float32 safe
+---
+bool success
+string message

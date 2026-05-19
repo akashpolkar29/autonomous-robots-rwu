@@ -2,27 +2,35 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from custom_interfaces.msg import DangerZones
+from custom_interfaces.srv import SetZoneSize
 import math
 
 class CollisionDetectorNode(Node):
     def __init__(self):
         super().__init__('collision_detector_node')
+
+        # Default zone sizes
+        self.critical = 0.5
+        self.warn = 0.75
+        self.safe = 1.0
+
         self.subscription = self.create_subscription(
-            LaserScan,
-            '/scan',
-            self.scan_callback,
-            10)
+            LaserScan, '/scan', self.scan_callback, 10)
         self.publisher = self.create_publisher(DangerZones, '/danger_zones', 10)
+        self.service = self.create_service(
+            SetZoneSize, '/set_zone_size', self.set_zone_size_callback)
+
+        self.get_logger().info('collision_detector_node started')
 
     def get_danger_level(self, distance):
-        if distance <= 0.5:
+        if distance <= self.critical:
             return 3  # red
-        elif distance <= 0.75:
+        elif distance <= self.warn:
             return 2  # yellow
-        elif distance <= 1.0:
+        elif distance <= self.safe:
             return 1  # green
         else:
-            return 0  # white (safe)
+            return 0  # white
 
     def get_min_distance(self, ranges, start_idx, end_idx):
         sector = ranges[start_idx:end_idx]
@@ -31,9 +39,8 @@ class CollisionDetectorNode(Node):
 
     def scan_callback(self, msg):
         ranges = msg.ranges
-        total = len(ranges)  # should be ~360
+        total = len(ranges)
 
-        # Each quadrant is 90° = ~90 indices
         front_left_dist  = self.get_min_distance(ranges, 0, 45)
         front_right_dist = self.get_min_distance(ranges, total - 45, total)
         back_left_dist   = self.get_min_distance(ranges, 135, 180)
@@ -50,6 +57,24 @@ class CollisionDetectorNode(Node):
             f'FL:{danger.front_left} FR:{danger.front_right} '
             f'BL:{danger.back_left} BR:{danger.back_right}'
         )
+
+    def set_zone_size_callback(self, request, response):
+        # Validate: critical < warn < safe
+        if request.critical < request.warn < request.safe:
+            self.critical = request.critical
+            self.warn = request.warn
+            self.safe = request.safe
+            response.success = True
+            response.message = (
+                f'Zone sizes updated: critical={self.critical}, '
+                f'warn={self.warn}, safe={self.safe}'
+            )
+            self.get_logger().info(response.message)
+        else:
+            response.success = False
+            response.message = 'Invalid zone sizes: must satisfy critical < warn < safe'
+            self.get_logger().warn(response.message)
+        return response
 
 def main(args=None):
     rclpy.init(args=args)
