@@ -12,6 +12,7 @@ find_package(action_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DangerZones.msg"
+  "srv/SetZoneSize.srv"
   "action/TravelNoCrashing.action"
   DEPENDENCIES builtin_interfaces action_msgs
 )
