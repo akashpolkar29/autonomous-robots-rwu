@@ -1,20 +1,23 @@
-import rclpy
-from rclpy.node import Node
-from rclpy.action import ActionServer
-from rclpy.executors import MultiThreadedExecutor
-from rclpy.callback_groups import ReentrantCallbackGroup
-
 import math
 import time
 
-from custom_interfaces.action import TravelNoCrashing
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Twist
-from builtin_interfaces.msg import Duration
+import rclpy
+from rclpy.action import ActionServer
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+from rclpy.qos import (
+    QoSProfile,
+    ReliabilityPolicy,
+    DurabilityPolicy,
+)
 
-# ---- Import your existing DangerZones message ----
-# Adjust this import to match your actual message type!
-from custom_interfaces.msg import DangerZones  # <-- check your msg folder name
+from builtin_interfaces.msg import Duration
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+
+from custom_interfaces.action import TravelNoCrashing
+from custom_interfaces.msg import DangerZones
 
 
 class CollisionAvoiderNode(Node):
@@ -22,163 +25,320 @@ class CollisionAvoiderNode(Node):
     def __init__(self):
         super().__init__('collision_avoider_node')
 
-        self._cb_group = ReentrantCallbackGroup()
+        self.cb_action = MutuallyExclusiveCallbackGroup()
+        self.cb_topics = MutuallyExclusiveCallbackGroup()
 
-        # Action server
-        self._action_server = ActionServer(
-            self,
-            TravelNoCrashing,
-            '/drive_no_crashing',
-            self.execute_callback,
-            callback_group=self._cb_group
+        # Robot position
+        self.current_x = None
+        self.current_y = None
+
+        self.start_x = None
+        self.start_y = None
+
+        # Danger information
+        self.danger_zones = DangerZones()
+
+        self.most_dangerous = 'none'
+        self.highest_danger = 0
+
+        # QoS for odom
+        odom_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            depth=10
         )
 
-        # Odometry subscriber
-        self._odom_sub = self.create_subscription(
+        # Publisher
+        self.cmd_vel_pub = self.create_publisher(
+            Twist,
+            '/cmd_vel',
+            10
+        )
+
+        # Subscribers
+        self.odom_sub = self.create_subscription(
             Odometry,
             '/odom',
             self.odom_callback,
-            10,
-            callback_group=self._cb_group
+            qos_profile=odom_qos,
+            callback_group=self.cb_topics
         )
 
-        # Danger zones subscriber
-        self._danger_sub = self.create_subscription(
+        self.danger_sub = self.create_subscription(
             DangerZones,
             '/danger_zones',
             self.danger_callback,
             10,
-            callback_group=self._cb_group
+            callback_group=self.cb_topics
         )
 
-        # Velocity publisher
-        self._cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Action server
+        self.action_server = ActionServer(
+            self,
+            TravelNoCrashing,
+            '/drive_no_crashing',
+            self.execute_callback,
+            callback_group=self.cb_action
+        )
 
-        # State
-        self._current_x = None
-        self._current_y = None
-        self._danger_zones = None
-        self._most_dangerous_zone = ''
-        self._highest_danger_value = 0
+        self.get_logger().info('CollisionAvoiderNode started')
 
-        self.get_logger().info('CollisionAvoiderNode ready.')
+    # -------------------------------------------------
+    # CALLBACKS
+    # -------------------------------------------------
 
-    def odom_callback(self, msg: Odometry):
-        self._current_x = msg.pose.pose.position.x
-        self._current_y = msg.pose.pose.position.y
+    def odom_callback(self, msg):
+        self.current_x = msg.pose.pose.position.x
+        self.current_y = msg.pose.pose.position.y
 
     def danger_callback(self, msg):
-        # Adjust this logic to your actual DangerZones message fields!
-        # This assumes your message has a list of zones with a name and danger value.
-        self._danger_zones = msg
-        highest = 0
-        most_dangerous = ''
-        # Example: msg.zones is a list with .name and .danger_value fields
-        # Adjust to your actual message structure:
-        for zone in msg.zones:
-            if zone.danger_value > highest:
-                highest = zone.danger_value
-                most_dangerous = zone.name
-        self._most_dangerous_zone = most_dangerous
-        self._highest_danger_value = highest
+
+        self.danger_zones = msg
+
+        zones = {
+            'front_left': msg.front_left,
+            'front_right': msg.front_right,
+            'back_left': msg.back_left,
+            'back_right': msg.back_right,
+        }
+
+        max_zone = max(zones, key=zones.get)
+        max_value = zones[max_zone]
+
+        if max_value > self.highest_danger:
+            self.highest_danger = max_value
+            self.most_dangerous = max_zone
+
+    # -------------------------------------------------
+    # HELPERS
+    # -------------------------------------------------
+
+    def get_traveled_distance(self):
+
+        if (
+            self.start_x is None or
+            self.start_y is None or
+            self.current_x is None or
+            self.current_y is None
+        ):
+            return 0.0
+
+        return math.sqrt(
+            (self.current_x - self.start_x) ** 2 +
+            (self.current_y - self.start_y) ** 2
+        )
+
+    def stop_robot(self):
+        self.cmd_vel_pub.publish(Twist())
+
+    # -------------------------------------------------
+    # ACTION CALLBACK
+    # -------------------------------------------------
 
     def execute_callback(self, goal_handle):
-        self.get_logger().info(f'Received goal: travel {goal_handle.request.target_distance} m')
 
-        # Wait until we have an odom fix
-        while self._current_x is None:
-            self.get_logger().info('Waiting for /odom...')
+        target_distance = goal_handle.request.target_distance
+
+        self.get_logger().info(
+            f'Received goal: {target_distance:.2f} meters'
+        )
+
+        # Wait for odometry
+        start_wait = time.time()
+
+        while self.current_x is None:
+
+            if time.time() - start_wait > 10.0:
+                self.get_logger().error('No odom received')
+
+                goal_handle.abort()
+
+                result = TravelNoCrashing.Result()
+                return result
+
             time.sleep(0.1)
 
-        start_x = self._current_x
-        start_y = self._current_y
-        start_time = self.get_clock().now()
+        # Reset tracking
+        self.start_x = self.current_x
+        self.start_y = self.current_y
 
-        target = goal_handle.request.target_distance
+        self.highest_danger = 0
+        self.most_dangerous = 'none'
+
+        # Timing
+        start_time = time.time()
+        last_feedback_time = start_time
+        last_log_time = start_time
+
         feedback_msg = TravelNoCrashing.Feedback()
 
-        FORWARD_SPEED = 0.2       # m/s
-        TURN_SPEED = 0.5          # rad/s
-        DANGER_THRESHOLD = 50     # adjust to your danger scale
-        FEEDBACK_INTERVAL = 3.0   # seconds
+        # Main control loop
+        while rclpy.ok():
 
-        last_feedback_time = time.time()
-        rate_hz = 10
-        loop_rate = 1.0 / rate_hz
+            # Handle cancel request
+            if goal_handle.is_cancel_requested:
 
-        cmd = Twist()
+                self.stop_robot()
 
-        while True:
-            # Calculate traveled distance
-            dx = self._current_x - start_x
-            dy = self._current_y - start_y
-            traveled = math.sqrt(dx * dx + dy * dy)
+                goal_handle.canceled()
 
-            # Check if goal reached
-            if traveled >= target:
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0
-                self._cmd_pub.publish(cmd)
+                self.get_logger().info('Goal canceled')
+
+                result = TravelNoCrashing.Result()
+                return result
+
+            # Safety timeout
+            if time.time() - start_time > 40.0:
+
+                self.stop_robot()
+
+                self.get_logger().error('Navigation timeout')
+
+                goal_handle.abort()
+
+                result = TravelNoCrashing.Result()
+                return result
+
+            traveled = self.get_traveled_distance()
+
+            # Print only once per second
+            if time.time() - last_log_time > 1.0:
+
+                self.get_logger().info(
+                    f'Traveled: {traveled:.2f}/{target_distance:.2f} m'
+                )
+
+                last_log_time = time.time()
+
+            # Goal reached
+            if traveled >= target_distance:
+
+                self.stop_robot()
+
+                self.get_logger().info('Goal reached')
+
                 break
 
-            # Collision avoidance logic
-            # Adapt this to your actual DangerZones message fields!
-            danger_front = False
-            if self._danger_zones is not None:
-                for zone in self._danger_zones.zones:
-                    if 'front' in zone.name.lower() and zone.danger_value > DANGER_THRESHOLD:
-                        danger_front = True
-                        break
+            # Read danger values
+            front_left = self.danger_zones.front_left
+            front_right = self.danger_zones.front_right
 
-            if danger_front:
-                # Turn to avoid
-                cmd.linear.x = 0.0
-                cmd.angular.z = TURN_SPEED
+            front_danger = max(front_left, front_right)
+
+            twist = Twist()
+
+            # -------------------------------------------------
+            # COLLISION AVOIDANCE
+            # -------------------------------------------------
+
+            # Critical danger
+            if front_danger >= 3:
+
+                # IMPORTANT:
+                # move slightly forward while turning
+                # otherwise robot may spin forever
+
+                twist.linear.x = 0.05
+
+                if front_left >= front_right:
+                    twist.angular.z = -0.6
+                else:
+                    twist.angular.z = 0.6
+
+            # Medium danger
+            elif front_danger == 2:
+
+                twist.linear.x = 0.12
+
+                if front_left >= front_right:
+                    twist.angular.z = -0.3
+                else:
+                    twist.angular.z = 0.3
+
+            # Low danger
+            elif front_danger == 1:
+
+                twist.linear.x = 0.18
+                twist.angular.z = 0.0
+
+            # No danger
             else:
-                # Drive forward
-                cmd.linear.x = FORWARD_SPEED
-                cmd.angular.z = 0.0
 
-            self._cmd_pub.publish(cmd)
+                twist.linear.x = 0.25
+                twist.angular.z = 0.0
 
-            # Publish feedback every 3 seconds
+            self.cmd_vel_pub.publish(twist)
+
+            # -------------------------------------------------
+            # FEEDBACK EVERY 3 SECONDS
+            # -------------------------------------------------
+
             now = time.time()
-            if now - last_feedback_time >= FEEDBACK_INTERVAL:
-                elapsed = self.get_clock().now() - start_time
-                elapsed_sec = int(elapsed.nanoseconds / 1e9)
-                elapsed_nanosec = int(elapsed.nanoseconds % 1e9)
 
-                dur = Duration()
-                dur.sec = elapsed_sec
-                dur.nanosec = elapsed_nanosec
+            if now - last_feedback_time >= 3.0:
+
+                elapsed = now - start_time
+
+                secs = int(elapsed)
+                nanosec = int((elapsed - secs) * 1e9)
 
                 feedback_msg.traveled_distance = traveled
-                feedback_msg.time_traveled = dur
+
+                feedback_msg.time_traveled = Duration(
+                    sec=secs,
+                    nanosec=nanosec
+                )
+
                 goal_handle.publish_feedback(feedback_msg)
-                self.get_logger().info(f'Feedback: traveled {traveled:.2f} m')
+
+                self.get_logger().info(
+                    f'Feedback sent: {traveled:.2f} m'
+                )
+
                 last_feedback_time = now
 
-            time.sleep(loop_rate)
+            # ROS-friendly sleep
+            time.sleep(0.05)
 
-        # Set result
-        goal_handle.succeed()
+        # -------------------------------------------------
+        # RESULT
+        # -------------------------------------------------
+
         result = TravelNoCrashing.Result()
-        result.traveled_distance = traveled
-        result.most_dangerous_zone = self._most_dangerous_zone
-        result.highest_danger_value = self._highest_danger_value
-        self.get_logger().info(f'Goal succeeded! Traveled {traveled:.2f} m')
+
+        result.traveled_distance = self.get_traveled_distance()
+        result.most_dangerous_zone = self.most_dangerous
+        result.highest_danger_value = self.highest_danger
+
+        goal_handle.succeed()
+
+        self.get_logger().info('Action succeeded')
+
         return result
 
 
 def main(args=None):
+
     rclpy.init(args=args)
+
     node = CollisionAvoiderNode()
-    executor = MultiThreadedExecutor()
+
+    executor = MultiThreadedExecutor(num_threads=4)
+
     executor.add_node(node)
+
     try:
         executor.spin()
+
+    except KeyboardInterrupt:
+        pass
+
     finally:
+
+        node.stop_robot()
+
         node.destroy_node()
+
         rclpy.shutdown()
 
 
