@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'collision_detector_node = collision_avoidance.collision_detector_node:main',
+            'collision_avoider_node = collision_avoidance.collision_avoider_node:main',
         ],
     },
 )

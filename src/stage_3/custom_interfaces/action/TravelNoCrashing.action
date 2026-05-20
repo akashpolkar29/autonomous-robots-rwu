@@ -1,0 +1,11 @@
+# Goal
+float64 target_distance
+---
+# Result
+float64 traveled_distance
+string most_dangerous_zone
+int64 highest_danger_value
+---
+# Feedback
+float64 traveled_distance
+builtin_interfaces/Duration time_traveled
